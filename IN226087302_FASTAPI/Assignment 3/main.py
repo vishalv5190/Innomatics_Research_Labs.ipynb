@@ -1,106 +1,94 @@
-from fastapi import FastAPI, Query, status
-from typing import Optional
+from fastapi import FastAPI, HTTPException, Query, Response, status
+from pydantic import BaseModel
+from typing import Optional, List
 
 app = FastAPI()
 
-# --- Initial Data ---
 products = [
-    {"id": 1, "name": "Wireless Mouse", "price": 499, "category": "Electronics"},
-    {"id": 2, "name": "Notebook", "price": 99, "category": "Stationery"},
-    {"id": 3, "name": "USB Hub", "price": 799, "category": "Electronics"},
-    {"id": 4, "name": "Pen Set", "price": 49, "category": "Stationery"},
+    {"id": 1, "name": "Wireless Mouse", "price": 499, "category": "Electronics", "in_stock": True},
+    {"id": 2, "name": "Notebook", "price": 150, "category": "Stationery", "in_stock": True},
+    {"id": 3, "name": "USB Hub", "price": 799, "category": "Electronics", "in_stock": False},
+    {"id": 4, "name": "Pen Set", "price": 49, "category": "Stationery", "in_stock": True},
 ]
 
-orders = [] # Will be populated via POST /orders during your tests
+def find_product(product_id: int):
+    return next((p for p in products if p['id'] == product_id), None)
 
-# --- Existing Endpoints (Search, Sort, Pagination) ---
+class NewProduct(BaseModel):
+    name: str
+    price: int
+    category: str
+    in_stock: bool = True
 
-@app.get("/products/search")
-def search_products(keyword: str):
-    results = [p for p in products if keyword.lower() in p['name'].lower()]
-    if not results:
-        return {"message": f"No products found for: {keyword}"}
-    return {"keyword": keyword, "total_found": len(results), "products": results}
+@app.get("/products")
+def get_products():
+    return {"products": products, "total": len(products)}
 
-@app.get("/products/sort")
-def sort_products(sort_by: str = "price", order: str = "asc"):
-    if sort_by not in ["price", "name"]:
-        return {"error": "sort_by must be 'price' or 'name'"}
-    
-    rev = (order == "desc")
-    results = sorted(products, key=lambda p: p[sort_by], reverse=rev)
-    return {"sort_by": sort_by, "order": order, "products": results}
+@app.post("/products", status_code=201)
+def add_product(product: NewProduct):
+    if any(p['name'].lower() == product.name.lower() for p in products):
+        raise HTTPException(status_code=400, detail="Product names must be unique")
+    next_id = max((p['id'] for p in products), default=0) + 1
+    new_product = product.dict()
+    new_product['id'] = next_id
+    products.append(new_product)
+    return {"message": "Product added", "product": new_product}
 
-@app.get("/products/page")
-def paginate_products(page: int = 1, limit: int = 2):
-    start = (page - 1) * limit
-    paged_data = products[start : start + limit]
+@app.get('/products/audit')
+def product_audit():
+    in_stock_list  = [p for p in products if p['in_stock']]
+    out_stock_list = [p for p in products if not p['in_stock']]
+    stock_value    = sum(p['price'] * 10 for p in in_stock_list)
+    priciest       = max(products, key=lambda p: p['price'])
     return {
-        "page": page,
-        "limit": limit,
-        "total_pages": -(-len(products) // limit),
-        "products": paged_data
+        'total_products':    len(products),
+        'in_stock_count':    len(in_stock_list),
+        'out_of_stock_names': [p['name'] for p in out_stock_list],
+        'total_stock_value':  stock_value,
+        'most_expensive':    {'name': priciest['name'], 'price': priciest['price']},
     }
 
-# --- New Assignment Endpoints (Q4, Q5, Q6) ---
-
-@app.get("/orders/search")
-def search_orders(customer_name: str = Query(...)):
-    results = [o for o in orders if customer_name.lower() in o['customer_name'].lower()]
-    if not results:
-        return {"message": f"No orders found for: {customer_name}"}
-    return {"customer_name": customer_name, "total_found": len(results), "orders": results}
-
-@app.get("/products/sort-by-category")
-def sort_by_category():
-    # Sorts first by category (A-Z), then by price (Low-High)
-    result = sorted(products, key=lambda p: (p['category'], p['price']))
-    return {"products": result, "total": len(result)}
-
-@app.get("/products/browse")
-def browse_products(
-    keyword: Optional[str] = Query(None),
-    sort_by: str = Query('price'),
-    order: str = Query('asc'),
-    page: int = Query(1, ge=1),
-    limit: int = Query(4, ge=1, le=20),
+@app.put('/products/discount')
+def bulk_discount(
+    category: str = Query(..., description='Category to discount'),
+    discount_percent: int = Query(..., ge=1, le=99, description='% off'),
 ):
-    # 1. Search/Filter
-    result = products
-    if keyword:
-        result = [p for p in result if keyword.lower() in p['name'].lower()]
-
-    # 2. Sort
-    if sort_by in ['price', 'name']:
-        result = sorted(result, key=lambda p: p[sort_by], reverse=(order == 'desc'))
-
-    # 3. Paginate
-    total = len(result)
-    start = (page - 1) * limit
-    paged = result[start : start + limit]
-
+    updated = []
+    for p in products:
+        if p['category'] == category:
+            p['price'] = int(p['price'] * (1 - discount_percent / 100))
+            updated.append(p)
+    if not updated:
+        return {'message': f'No products found in category: {category}'}
     return {
-        "keyword": keyword, "sort_by": sort_by, "order": order,
-        "page": page, "limit": limit, "total_found": total,
-        "total_pages": -(-total // limit),
-        "products": paged
+        'message': f'{discount_percent}% discount applied to {category}',
+        'updated_count': len(updated),
+        'updated_products': updated,
     }
 
-# --- Bonus: Paginate Orders ---
-@app.get("/orders/page")
-def get_orders_paged(page: int = Query(1, ge=1), limit: int = Query(3, ge=1)):
-    start = (page - 1) * limit
-    return {
-        "page": page,
-        "limit": limit,
-        "total": len(orders),
-        "total_pages": -(-len(orders) // limit),
-        "orders": orders[start : start + limit]
-    }
+@app.get("/products/{product_id}")
+def get_product(product_id: int):
+    p = find_product(product_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="Product not found")
+    return {"product": p}
 
-# --- POST endpoint to help you add data for testing ---
-@app.post("/orders")
-def place_order(customer_name: str, item_id: int):
-    new_order = {"order_id": len(orders) + 1, "customer_name": customer_name, "item_id": item_id}
-    orders.append(new_order)
-    return new_order
+@app.put("/products/{product_id}")
+def update_product(product_id: int, price: Optional[int] = None, in_stock: Optional[bool] = None):
+    p = find_product(product_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="Product not found")
+    if price is not None:
+        p['price'] = price
+    if in_stock is not None:
+        p['in_stock'] = in_stock
+    return {"message": "Product updated", "product": p}
+
+@app.delete('/products/{product_id}')
+def delete_product(product_id: int, response: Response):
+    product = find_product(product_id)
+    if not product:
+        response.status_code = status.HTTP_404_NOT_FOUND
+        return {'error': 'Product not found'}
+    products.remove(product)
+    return {'message': f"Product '{product['name']}' deleted"}
